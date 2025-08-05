@@ -31,11 +31,10 @@ Riptide is both a **tool manager** and **workflow visualizer** for machine learn
 
 | Tool     | Role                                                  |
 |----------|-------------------------------------------------------|
-| `SAIL`   | Stats, automation, and inferencing library            |
-| `SURF`   | Simulated UI rating framework                         |
-| `DOCK`   | Data wrangling and input structuring from raw sources |
-| `ANCHOR` | (Coming soon) Deployment anchoring + container ops    |
-| `BUOY`   | (Coming soon) Lightweight observability for models    |
+| `DOCK`   | Data Organization and Cleaning Kit                    |
+| `SAIL`   | Stats, Automation, and Inferencing Library            |
+| `SURF`   | Simulated UI Rating Framework                         |
+| `BUOY`   | Behavioral Uptime and Observabiilty Yield             |
 
 ---
 
