@@ -1,4 +1,4 @@
-🌊 # Riptide
+#🌊 Riptide
 
 Riptide is a nautical-themed CLI + TUI toolkit that bundles together essential tools for managing end-to-end MLOps workflows — all from your terminal.
 
