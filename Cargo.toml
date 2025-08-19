@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "core",
+    "dock",
+    "sail",
+    "surf",
+    "buoy",
+]
+
+resolver = "3"
