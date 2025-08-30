@@ -1,0 +1,16 @@
+version: '3.9'
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: surrealdb
+    ports:
+      - "8080:8080"   # Expose SurrealDB HTTP/WS port
+    command: start --log trace --bind 0.0.0.0:8080 file:/data/riptide.db
+    volumes:
+      - riptide:/requirements
+    restart: unless-stopped
+
+
+volumes:
+  riptide:
