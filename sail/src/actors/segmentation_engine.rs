@@ -47,6 +47,9 @@ pub enum SegmentationError {
 
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
+
+    #[error("Cannot generate dataframe from supplied data: {0}")]
+    DataFrameError(String),
 }
 
 /// Implmentation
@@ -104,7 +107,7 @@ impl SegmentationEngine {
 mod util {
 
     use super::*;
-    use e57::E57Reader;
+    use e57::{CartesianCoordinate, E57Reader, RecordValue};
     use polars::prelude::*;
     use std::fs::File;
     use std::io::BufReader;
@@ -132,17 +135,48 @@ mod util {
 
         let pointclouds = e57_reader.pointclouds();
         println!("Found {} point clouds in the file.", pointclouds.len());
-
         for (i, pointcloud) in pointclouds.iter().enumerate() {
-            println!("Point cloud {} has {} points", i, pointcloud.records);
+            // Prepare vectors for each column
+            let mut xs = Vec::new();
+            let mut ys = Vec::new();
+            let mut zs = Vec::new();
+            let mut rs = Vec::new();
+            let mut gs = Vec::new();
+            let mut bs = Vec::new();
 
-            for points in e57_reader.pointcloud_simple(pointcloud).unwrap() {
-                println!("Point: {:?}", points);
+            for point_result in e57_reader.pointcloud_raw(pointcloud).unwrap() {
+                let point = point_result.unwrap(); // unwrap Result
+                                                   // point[0..2] are Single(f32/f64), point[3..5] are Integer(i32)
+                if let [RecordValue::Single(x), RecordValue::Single(y), RecordValue::Single(z), RecordValue::Integer(r), RecordValue::Integer(g), RecordValue::Integer(b)] =
+                    &point[..]
+                {
+                    xs.push(*x as f64); // Polars uses f64 for Float64Chunked
+                    ys.push(*y as f64);
+                    zs.push(*z as f64);
+                    rs.push(*r);
+                    gs.push(*g);
+                    bs.push(*b);
+                }
             }
+
+            let df = DataFrame::new(vec![
+                Series::new("x", xs),
+                Series::new("y", ys),
+                Series::new("z", zs),
+                Series::new("r", rs),
+                Series::new("g", gs),
+                Series::new("b", bs),
+            ])
+            .map_err(|e| SegmentationError::DataFrameError(e.to_string()))?;
+            println!("{:?}", df);
+
+            return Ok(df);
         }
+
         // Temp
-        Ok(DataFrame::default())
+        Err(SegmentationError::LoadError("Exit".into()))
     }
+
     /// Saves the ifc file to the location
     pub fn save(file: Option<&str>, ifc: &IFC) -> Result<IFC, SegmentationError> {
         todo!();
