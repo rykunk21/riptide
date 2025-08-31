@@ -50,6 +50,7 @@ pub enum SegmentationError {
 
     #[error("Cannot generate dataframe from supplied data: {0}")]
     DataFrameError(String),
+    E57ReadError(String),
 }
 
 /// Implmentation
@@ -116,47 +117,59 @@ mod util {
     use polars::prelude::DataFrame;
     use serde_json::Value as Json;
 
-    pub type E57 = DataFrame;
+    pub type E57 = LazyFrame;
     pub type IFC = Json;
 
-    pub fn load(file: &str) -> Result<DataFrame, SegmentationError> {
-        // open the file and read into buf reader. E57 files usually contain a lot of data so
-        // buffering is necessary to prevent failures
+    pub fn load(file: &str) -> Result<E57, SegmentationError> {
+        // Open the file
         let f = File::open(file).map_err(|e| {
             SegmentationError::FileNotFound(format!("Could not open {}: {}", file, e))
         })?;
-
         let reader = BufReader::new(f);
 
-        // Create an E57 reader instance
         let mut e57_reader = E57Reader::new(reader).map_err(|e| {
             SegmentationError::InvalidFormat(format!("Invalid E57 format: {:?}", e))
         })?;
 
         let pointclouds = e57_reader.pointclouds();
         println!("Found {} point clouds in the file.", pointclouds.len());
-        for (i, pointcloud) in pointclouds.iter().enumerate() {
-            // Prepare vectors for each column
-            let mut xs = Vec::new();
-            let mut ys = Vec::new();
-            let mut zs = Vec::new();
-            let mut rs = Vec::new();
-            let mut gs = Vec::new();
-            let mut bs = Vec::new();
 
-            for point_result in e57_reader.pointcloud_raw(pointcloud).unwrap() {
-                let point = point_result.unwrap(); // unwrap Result
-                                                   // point[0..2] are Single(f32/f64), point[3..5] are Integer(i32)
-                if let [RecordValue::Single(x), RecordValue::Single(y), RecordValue::Single(z), RecordValue::Integer(r), RecordValue::Integer(g), RecordValue::Integer(b)] =
-                    &point[..]
-                {
-                    xs.push(*x as f64); // Polars uses f64 for Float64Chunked
-                    ys.push(*y as f64);
-                    zs.push(*z as f64);
-                    rs.push(*r);
-                    gs.push(*g);
-                    bs.push(*b);
-                }
+        // Mapped iterator to return rows in point format
+        let iter = e57_reader
+            .pointcloud_simple(&pointclouds[0]) // pick the first point cloud for now
+            .map_err(|e| SegmentationError::E57ReadError(e.to_string()))? // map the error
+            .map(|pt| {
+                // convert point into a Polars Series-friendly row
+                pt.map(|p| {
+                    match &p.cartesian {
+                        CartesianCoordinate::Valid { x, y, z }
+                        | CartesianCoordinate::Direction { x, y, z } => {
+                            vec![(*x).into(), (*y).into(), (*z).into()]
+                        }
+                        CartesianCoordinate::Invalid => {
+                            // handle invalid points however you like, e.g., fill with NaN
+                            vec![f64::NAN.into(), f64::NAN.into(), f64::NAN.into()]
+                        }
+                    }
+                })
+            });
+
+        const CHUNK_SIZE: usize = 10_000;
+        let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+
+        for row in iter {
+            let row = row.unwrap_or(vec![f64::NAN; 3]);
+            chunk.push(row);
+
+            if chunk.len() == CHUNK_SIZE {
+                let df = DataFrame::new(vec![
+                    Series::new("x", chunk.iter().map(|r| r[0]).collect::<Vec<_>>()),
+                    Series::new("y", chunk.iter().map(|r| r[1]).collect::<Vec<_>>()),
+                    Series::new("z", chunk.iter().map(|r| r[2]).collect::<Vec<_>>()),
+                ])
+                .map_err(|e| SegmentationError::ParseError(e.to_string()))?;
+                process(df);
+                chunk.clear();
             }
 
             let df = DataFrame::new(vec![
@@ -173,8 +186,17 @@ mod util {
             return Ok(df);
         }
 
-        // Temp
-        Err(SegmentationError::LoadError("Exit".into()))
+        // process remaining points
+        if !chunk.is_empty() {
+            let df = DataFrame::new(vec![
+                Series::new("x", chunk.iter().map(|r| r[0]).collect::<Vec<_>>()),
+                Series::new("y", chunk.iter().map(|r| r[1]).collect::<Vec<_>>()),
+                Series::new("z", chunk.iter().map(|r| r[2]).collect::<Vec<_>>()),
+            ])
+            .map_err(|e| SegmentationError::ParseError(e.to_string()))?;
+            process(df);
+        } // Turn eager DataFrame into a LazyFrame
+        Ok(df.lazy())
     }
 
     /// Saves the ifc file to the location
