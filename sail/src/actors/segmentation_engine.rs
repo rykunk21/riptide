@@ -47,6 +47,7 @@ pub enum SegmentationError {
 
     #[error("Invalid file format: {0}")]
     InvalidFormat(String),
+    E57ReadError(String),
 }
 
 /// Implmentation
@@ -104,7 +105,7 @@ impl SegmentationEngine {
 mod util {
 
     use super::*;
-    use e57::E57Reader;
+    use e57::{CartesianCoordinate, E57Reader};
     use polars::prelude::*;
     use std::fs::File;
     use std::io::BufReader;
@@ -113,19 +114,16 @@ mod util {
     use polars::prelude::DataFrame;
     use serde_json::Value as Json;
 
-    pub type E57 = DataFrame;
+    pub type E57 = LazyFrame;
     pub type IFC = Json;
 
-    pub fn load(file: &str) -> Result<DataFrame, SegmentationError> {
-        // open the file and read into buf reader. E57 files usually contain a lot of data so
-        // buffering is necessary to prevent failures
+    pub fn load(file: &str) -> Result<E57, SegmentationError> {
+        // Open the file
         let f = File::open(file).map_err(|e| {
             SegmentationError::FileNotFound(format!("Could not open {}: {}", file, e))
         })?;
-
         let reader = BufReader::new(f);
 
-        // Create an E57 reader instance
         let mut e57_reader = E57Reader::new(reader).map_err(|e| {
             SegmentationError::InvalidFormat(format!("Invalid E57 format: {:?}", e))
         })?;
@@ -133,15 +131,56 @@ mod util {
         let pointclouds = e57_reader.pointclouds();
         println!("Found {} point clouds in the file.", pointclouds.len());
 
-        for (i, pointcloud) in pointclouds.iter().enumerate() {
-            println!("Point cloud {} has {} points", i, pointcloud.records);
+        // Mapped iterator to return rows in point format
+        let iter = e57_reader
+            .pointcloud_simple(&pointclouds[0]) // pick the first point cloud for now
+            .map_err(|e| SegmentationError::E57ReadError(e.to_string()))? // map the error
+            .map(|pt| {
+                // convert point into a Polars Series-friendly row
+                pt.map(|p| {
+                    match &p.cartesian {
+                        CartesianCoordinate::Valid { x, y, z }
+                        | CartesianCoordinate::Direction { x, y, z } => {
+                            vec![(*x).into(), (*y).into(), (*z).into()]
+                        }
+                        CartesianCoordinate::Invalid => {
+                            // handle invalid points however you like, e.g., fill with NaN
+                            vec![f64::NAN.into(), f64::NAN.into(), f64::NAN.into()]
+                        }
+                    }
+                })
+            });
 
-            for points in e57_reader.pointcloud_simple(pointcloud).unwrap() {
-                println!("Point: {:?}", points);
+        const CHUNK_SIZE: usize = 10_000;
+        let mut chunk = Vec::with_capacity(CHUNK_SIZE);
+
+        for row in iter {
+            let row = row.unwrap_or(vec![f64::NAN; 3]);
+            chunk.push(row);
+
+            if chunk.len() == CHUNK_SIZE {
+                let df = DataFrame::new(vec![
+                    Series::new("x", chunk.iter().map(|r| r[0]).collect::<Vec<_>>()),
+                    Series::new("y", chunk.iter().map(|r| r[1]).collect::<Vec<_>>()),
+                    Series::new("z", chunk.iter().map(|r| r[2]).collect::<Vec<_>>()),
+                ])
+                .map_err(|e| SegmentationError::ParseError(e.to_string()))?;
+                process(df);
+                chunk.clear();
             }
         }
-        // Temp
-        Ok(DataFrame::default())
+
+        // process remaining points
+        if !chunk.is_empty() {
+            let df = DataFrame::new(vec![
+                Series::new("x", chunk.iter().map(|r| r[0]).collect::<Vec<_>>()),
+                Series::new("y", chunk.iter().map(|r| r[1]).collect::<Vec<_>>()),
+                Series::new("z", chunk.iter().map(|r| r[2]).collect::<Vec<_>>()),
+            ])
+            .map_err(|e| SegmentationError::ParseError(e.to_string()))?;
+            process(df);
+        } // Turn eager DataFrame into a LazyFrame
+        Ok(df.lazy())
     }
     /// Saves the ifc file to the location
     pub fn save(file: Option<&str>, ifc: &IFC) -> Result<IFC, SegmentationError> {
